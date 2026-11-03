@@ -1,0 +1,27 @@
+# Workspace manifest for the llm-stream-server project.
+#
+# Milestone 1 only needs the `core` crate, but the workspace table is set up so
+# the future member crates named in the project spec (server, py, bench, ffi)
+# can be dropped into `crates/` and added to `members` without reshaping the
+# project. Shared dependency versions live in `[workspace.dependencies]` so that
+# every crate pins the same version of tokio/serde/etc. from one place — this
+# keeps the dependency graph consistent and avoids accidental version skew once
+# more crates are added.
+[workspace]
+resolver = "2"
+members = ["crates/core"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.75"
+
+# Centralized dependency versions. Member crates opt in with
+# `dep = { workspace = true }` (plus any crate-specific feature list).
+[workspace.dependencies]
+tokio = { version = "1", default-features = false }
+tokio-util = { version = "0.7", default-features = false }
+futures = { version = "0.3", default-features = false }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"

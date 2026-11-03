@@ -1,0 +1,19 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# Cargo lock is kept for binaries/workspaces; keep it committed.
+# (Left tracked on purpose — this workspace will ship binaries later.)
+
+# Backup / editor files
+*.swp
+*.swo
+*~
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/

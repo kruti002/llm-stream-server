@@ -1,0 +1,35 @@
+[package]
+name = "llm-stream-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Core types, backend trait, and a deterministic mock backend for the llm-stream-server project."
+
+[lib]
+name = "llm_stream_core"
+path = "src/lib.rs"
+
+[dependencies]
+# Async trait support: `async fn` in traits still benefits from async-trait here
+# because the trait returns a boxed trait object (`dyn Backend`) and we want the
+# futures boxed for object safety across backends.
+async-trait = { workspace = true }
+# `futures` gives us the `Stream` combinators and the `BoxStream` alias used in
+# the Backend trait's return type.
+futures = { workspace = true, features = ["std", "async-await"] }
+serde = { workspace = true }
+thiserror = { workspace = true }
+# Only the pieces of tokio the mock needs: the current-thread/multi-thread
+# runtime, timers (`sleep`) and the sync primitives. Kept narrow to honor the
+# "dependency-light default build" constraint.
+tokio = { workspace = true, features = ["rt", "time", "sync", "macros"] }
+# CancellationToken — the reusable cancellation primitive the server crate will
+# reuse later to cancel generation when a client disconnects.
+tokio-util = { workspace = true }
+
+[dev-dependencies]
+# The multi-thread runtime + test macro are only needed to drive the async unit
+# tests; keeping them in dev-dependencies keeps the production build lean.
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time", "sync", "macros", "test-util"] }
+futures = { workspace = true, features = ["std", "async-await"] }
