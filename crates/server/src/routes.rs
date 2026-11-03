@@ -8,11 +8,14 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::http::StatusCode;
+use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use futures::stream;
 use futures::StreamExt;
 use llm_stream_core::{GenerateRequest, TokenChunk};
 use serde::Serialize;
+use std::convert::Infallible;
 use tokio::sync::OwnedSemaphorePermit;
 
 use crate::error::ApiError;
@@ -79,79 +82,65 @@ pub async fn generate(
     Ok(Json(GenerateResponse { text, chunks }))
 }
 
-/// `POST /v1/generate/stream` — **USER-RESERVED STUB. DO NOT IMPLEMENT HERE.**
+/// `POST /v1/generate/stream` — stream tokens to the client as Server-Sent
+/// Events (SSE).
 ///
-/// # The contract you must implement
+/// # What it does
 ///
-/// This handler must stream the backend's tokens to the client as
-/// Server-Sent Events (SSE):
+/// * Acquires a concurrency permit exactly like [`generate`] (returns `429`
+///   when the semaphore is full) and keeps it alive for the whole stream.
+/// * Calls the backend's `generate_stream` to get the token stream, then maps
+///   each [`TokenChunk`] to an SSE event whose `data` is the JSON-serialized
+///   chunk (so the client sees `index`, `text`, `done`), preserving index
+///   order. A final event named `done` marks a clean end (as opposed to the
+///   connection dropping).
 ///
-/// * Acquire a concurrency permit exactly like [`generate`] (return `429` when
-///   the semaphore is full), and keep it alive for the whole stream.
-/// * Call `state.backend.generate_stream(req)` to get the
-///   `BoxStream<Result<TokenChunk, Error>>`.
-/// * Emit **one SSE event per token**, where each event's `data` is the
-///   JSON-serialized [`TokenChunk`] (so the client sees `index`, `text`,
-///   `done`). Preserve index order — the backend already yields in order, so do
-///   not reorder or buffer out of sequence.
-/// * After the terminal token (`done == true`) emit a final event named
-///   `done` so the client knows the stream ended cleanly (as opposed to the
-///   connection dropping). Use correct SSE framing (`event:`/`data:` fields,
-///   blank-line terminators) — `axum::response::sse` gives you `Event` and
-///   `Sse` helpers that handle the wire format.
+/// # Client-disconnect cancellation
 ///
-/// # Client-disconnect cancellation (also yours to wire)
-///
-/// The core backends already cancel generation when the returned stream is
-/// dropped (a `CancellationToken` drop-guard — see `llm_stream_core`'s mock and
-/// Ollama backends). The integration point you must wire here:
-///
-/// * The SSE `Sse` response body is polled by axum only while the client is
-///   connected. When the client disconnects, axum drops the response body,
-///   which must in turn drop the backend token stream so its `CancellationToken`
-///   fires and the upstream generation stops. In the simplest design that
-///   happens automatically if the backend stream is *owned by* the SSE body and
-///   nothing else holds it alive. If you introduce an intermediate task/channel
-///   (e.g. to transform chunks into `Event`s), you MUST tie that task's
-///   lifetime to the connection — hold a `CancellationToken` (or the drop-guard)
-///   inside the SSE body so dropping the body cancels the task. Document which
-///   approach you chose and why.
-///
-/// # Why this returns an error instead of panicking
-///
-/// So the rest of the server stays bootable and the other routes' tests can
-/// run, this stub returns `501 Not Implemented` rather than calling `todo!()`
-/// at the process level. A `todo!()` panic inside a handler would only abort
-/// the one request on most runtimes, but returning an explicit, documented
-/// error keeps the failure legible to the integration test (which asserts the
-/// real SSE contract and therefore fails here until you implement it). See the
-/// failing test `sse_stream_delivers_tokens_then_done_event` in
-/// `tests/server_api.rs`.
-// TODO(you): implement the SSE route — see the failing test
-//            `sse_stream_delivers_tokens_then_done_event` and the
-//            disconnect test `client_disconnect_cancels_generation`.
+/// Cancellation is achieved by *ownership*, not by explicit disconnect
+/// detection. axum polls the `Sse` body only while the client is connected; on
+/// disconnect it drops the body. The backend token stream is owned by that body
+/// (moved into `tokens`, then `event_stream`, then `Sse::new`), and nothing
+/// else holds it alive — so dropping the body drops the token stream, which
+/// fires the core `CancellationToken` drop-guard and stops upstream generation.
+/// The concurrency permit is parked in the trailing `done` future for the same
+/// reason: it is released when the stream ends *or* when it is dropped early.
+/// This is why the handler deliberately does **not** `tokio::spawn` a pump task
+/// — a spawned task would outlive the dropped body and keep generating.
 pub async fn generate_stream(
-    State(_state): State<Arc<AppState>>,
-    Json(_req): Json<GenerateRequest>,
+    State(state): State<Arc<AppState>>,
+    Json(mut req): Json<GenerateRequest>,
 ) -> Response {
-    // NOTE: the return type is `axum::response::Response` (not `Sse<...>`) on
-    // purpose, so this stub type-checks while you have not yet produced an SSE
-    // stream. Once you implement it, build and return an
-    // `Sse::new(event_stream)` — it also implements `IntoResponse`, so you can
-    // keep this signature or narrow it to `Sse<...>`.
-    //
-    // Returning 501 keeps the server runnable so the health/models/generate
-    // and 429 tests pass; only the SSE/disconnect tests fail (at runtime, with
-    // this guiding message) until you write the handler.
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(serde_json::json!({
-            "error": "POST /v1/generate/stream is not implemented yet — this is \
-                      the user-reserved SSE handler. See routes::generate_stream \
-                      docs and the failing integration tests."
-        })),
-    )
-        .into_response()
+    let permit = match acquire_slot(&state) {
+        Ok(p) => p,
+        Err(e) => return e.into_response(),
+    };
+
+    apply_default_model(&mut req, &state);
+
+    let token_stream = match state.backend.generate_stream(req).await {
+        Ok(s) => s,
+        Err(e) => return ApiError::from(e).into_response(),
+    };
+
+    let tokens = token_stream.map(|item| {
+        let event = match item {
+            Ok(chunk) => Event::default()
+                .json_data(&chunk)
+                .unwrap_or_else(|e| Event::default().event("error").data(e.to_string())),
+            Err(e) => Event::default().event("error").data(e.to_string()),
+        };
+        Ok::<_, Infallible>(event)
+    });
+    let done = stream::once(async move {
+        // Holding the permit until the final event keeps the concurrency slot
+        // reserved for the whole stream; dropping the stream early (client
+        // disconnect) drops this future and releases it.
+        let _permit = permit;
+        Ok::<_, Infallible>(Event::default().event("done").data("[DONE]"))
+    });
+    let event_stream = tokens.chain(done);
+    Sse::new(event_stream).into_response()
 }
 
 /// Acquire a generation permit or map "none available" to a 429 error.
