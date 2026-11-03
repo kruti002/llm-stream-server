@@ -19,7 +19,18 @@ async-trait = { workspace = true }
 # the Backend trait's return type.
 futures = { workspace = true, features = ["std", "async-await"] }
 serde = { workspace = true }
+# `serde_json` parses Ollama's newline-delimited JSON stream, one object per
+# line. Shared version comes from the workspace.
+serde_json = { workspace = true }
 thiserror = { workspace = true }
+# HTTP client for the real OllamaBackend. Features are pinned at the workspace
+# level (json/stream/rustls-tls, default features off) — see the workspace
+# manifest for why native-tls/OpenSSL is avoided.
+reqwest = { workspace = true }
+# `bytes::Bytes` is the item type of reqwest's body byte-stream; we name it in
+# the stream state, so depend on it directly (reqwest re-exports the same
+# version transitively).
+bytes = { workspace = true }
 # Only the pieces of tokio the mock needs: the current-thread/multi-thread
 # runtime, timers (`sleep`) and the sync primitives. Kept narrow to honor the
 # "dependency-light default build" constraint.

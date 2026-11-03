@@ -1,0 +1,44 @@
+[package]
+name = "llm-stream-server"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Axum HTTP server exposing the llm-stream-core backends over REST + SSE."
+
+# A library target holds the router/handlers/config so integration tests in
+# `tests/` can build the app and drive it in-process, while the thin binary
+# only parses flags and runs the server.
+[lib]
+name = "llm_stream_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "llm-stream-server"
+path = "src/main.rs"
+
+[dependencies]
+# The whole point of the trait: the server is written once against the core
+# types and `dyn Backend`, with the concrete backend chosen at startup.
+llm-stream-core = { path = "../core" }
+
+axum = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "sync", "time", "net"] }
+tower = { workspace = true }
+# TraceLayer gives request/response tracing; the request-id layers stamp a
+# correlation id on every request.
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures = { workspace = true, features = ["std", "async-await"] }
+clap = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+# Integration tests start the real server and hit it over HTTP with reqwest,
+# and use tokio's multi-thread runtime + timers to drive concurrency/timing.
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
+reqwest = { workspace = true }
+futures = { workspace = true, features = ["std", "async-await"] }

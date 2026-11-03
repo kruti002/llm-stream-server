@@ -26,6 +26,12 @@
 //!   the producer stops at its next await. That is the same primitive the
 //!   server will wire to client-disconnect handling in a later milestone.
 //!
+//! * **A real [`OllamaBackend`] ([`ollama`]).** Streams tokens from a local
+//!   Ollama daemon by parsing its newline-delimited JSON over `reqwest`'s byte
+//!   stream. It reuses the same `CancellationToken` drop-guard pattern as the
+//!   mock so dropping the stream stops reading the HTTP body, keeping
+//!   cancellation behavior identical across backends.
+//!
 //! * **One error type ([`error`]).** A single coarse-grained [`Error`] enum
 //!   keeps the trait object-safe and gives the server a stable set of variants
 //!   to map onto HTTP status codes.
@@ -36,9 +42,11 @@
 mod backend;
 mod error;
 mod mock;
+mod ollama;
 mod types;
 
 pub use backend::Backend;
 pub use error::{Error, Result};
 pub use mock::{MockBackend, MOCK_SENTENCE};
+pub use ollama::{OllamaBackend, DEFAULT_OLLAMA_URL};
 pub use types::{GenerateRequest, TokenChunk};
