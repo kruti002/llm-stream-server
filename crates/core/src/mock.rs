@@ -24,6 +24,8 @@
 //! into client-disconnect handling later; keeping it here means that behavior
 //! is already exercised by the core tests.
 
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -40,17 +42,57 @@ use crate::types::{GenerateRequest, TokenChunk};
 pub const MOCK_SENTENCE: &str = "The quick brown fox jumps over the lazy dog";
 
 /// A deterministic backend that streams [`MOCK_SENTENCE`] token by token.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct MockBackend {
     /// Delay inserted before each emitted token. Configurable so tests can run
     /// fast (or assert that a larger delay is actually respected).
     per_token_delay: Duration,
+    /// Optional emission counter, incremented by the producer task *after* each
+    /// token is successfully sent. This is an observability hook: it lets a
+    /// test watch the producer's liveness directly, so a cancellation test can
+    /// prove the producer actually stopped (the counter stops advancing) rather
+    /// than merely inferring it from elapsed time. `None` in normal use, so it
+    /// costs nothing in production.
+    emitted: Option<Arc<AtomicUsize>>,
+    /// Optional "producer exited" flag, set to `true` exactly once when the
+    /// background task returns for any reason (completion, channel close, or
+    /// cancellation). Combined with a long `per_token_delay`, this lets a test
+    /// isolate the [`CancellationToken`] path specifically: with cancellation
+    /// working the task returns *immediately* on drop, whereas if only the
+    /// channel-close path worked the task would stay parked in `sleep(delay)`
+    /// until that delay elapsed. `None` in normal use.
+    exited: Option<Arc<AtomicBool>>,
 }
 
 impl MockBackend {
     /// Create a mock backend that waits `per_token_delay` between tokens.
     pub fn new(per_token_delay: Duration) -> Self {
-        Self { per_token_delay }
+        Self {
+            per_token_delay,
+            emitted: None,
+            exited: None,
+        }
+    }
+
+    /// Create a mock backend wired with test observability hooks:
+    ///
+    /// * `emitted` is incremented once per token the producer successfully
+    ///   pushes — a direct liveness signal.
+    /// * `exited` is set to `true` exactly once when the producer task returns.
+    ///
+    /// Together these let a cancellation test assert *both* that the producer
+    /// did not run to completion and that it stopped promptly via the
+    /// [`CancellationToken`] rather than only via the channel closing.
+    pub fn with_observers(
+        per_token_delay: Duration,
+        emitted: Arc<AtomicUsize>,
+        exited: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            per_token_delay,
+            emitted: Some(emitted),
+            exited: Some(exited),
+        }
     }
 
     /// Split the fixed sentence into its individual tokens.
@@ -62,12 +104,8 @@ impl MockBackend {
     }
 }
 
-impl Default for MockBackend {
-    /// A zero-delay mock — handy for tests that only care about ordering.
-    fn default() -> Self {
-        Self::new(Duration::ZERO)
-    }
-}
+// `Default` is derived: a zero-delay mock with no emission counter — handy for
+// tests that only care about ordering. `Duration::default()` is `Duration::ZERO`.
 
 #[async_trait]
 impl Backend for MockBackend {
@@ -78,6 +116,8 @@ impl Backend for MockBackend {
     {
         let tokens = Self::tokens();
         let delay = self.per_token_delay;
+        let emitted = self.emitted.clone();
+        let exited = self.exited.clone();
 
         // Bounded channel: a capacity of 1 gives natural backpressure, matching
         // what a real backend wants (don't race ahead of a slow consumer).
@@ -90,6 +130,19 @@ impl Backend for MockBackend {
         let producer_cancel = cancel.clone();
 
         tokio::spawn(async move {
+            // Fire the `exited` flag however this task returns — cancellation,
+            // send failure, or normal completion — by tying it to a guard whose
+            // Drop runs when the async block unwinds its stack on return.
+            struct ExitFlag(Option<Arc<AtomicBool>>);
+            impl Drop for ExitFlag {
+                fn drop(&mut self) {
+                    if let Some(flag) = self.0.take() {
+                        flag.store(true, Ordering::SeqCst);
+                    }
+                }
+            }
+            let _exit_flag = ExitFlag(exited);
+
             let last = tokens.len().saturating_sub(1);
             for (index, text) in tokens.into_iter().enumerate() {
                 // Respect the configured delay, but bail out immediately if the
@@ -109,6 +162,13 @@ impl Backend for MockBackend {
                 // If the receiver was dropped the send fails; stop producing.
                 if tx.send(Ok(chunk)).await.is_err() {
                     return;
+                }
+
+                // Record that a token actually left the producer. A test
+                // watching this counter can tell whether the producer is still
+                // alive after the consumer drops the stream.
+                if let Some(ref emitted) = emitted {
+                    emitted.fetch_add(1, Ordering::SeqCst);
                 }
             }
         });

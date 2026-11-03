@@ -4,6 +4,8 @@
 //! ordered tokens with a terminal `done`, a respected delay, and cancellation
 //! on drop.
 
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
@@ -66,39 +68,60 @@ async fn respects_configured_delay() {
 
 #[tokio::test]
 async fn dropping_the_stream_stops_emission() {
-    // The channel is capacity-1 and `MOCK_SENTENCE` has several tokens, so a
-    // producer that ignored cancellation would stay alive trying to push the
-    // remaining tokens. We consume just the first token, drop the stream, and
-    // then confirm emission actually stopped by observing the shared channel
-    // through a second clone of the backend is not possible — so instead we
-    // prove it via timing: a moderate per-token delay means a surviving
-    // producer would still be working well past when we finish.
-    let per_token = Duration::from_millis(50);
-    let backend = MockBackend::new(per_token);
+    // This test observes the producer DIRECTLY, and specifically isolates the
+    // `CancellationToken` path. A naive timing assertion ("we finished
+    // quickly") would pass whether or not cancellation works, because it only
+    // measures its own sleep. Worse, the mock has TWO ways to stop: the
+    // cancellation token (the reusable one the server will wire to client
+    // disconnects) and the channel closing when the receiver drops. A weak test
+    // could pass on channel-close alone while the token is broken.
+    //
+    // To force the token to be the thing under test we use a LONG per-token
+    // delay. The producer spends almost all its time parked in `sleep(delay)`.
+    //   * If the token works: dropping the stream cancels it, the `select!`
+    //     returns immediately, and the producer task exits in ~0ms.
+    //   * If only channel-close worked: the producer is still asleep and will
+    //     not even notice the dropped receiver until the delay elapses and it
+    //     tries to send. So it would stay alive for most of `delay`.
+    // We wait only a small fraction of `delay` after the drop and require the
+    // producer to have already exited. That window is too short for the
+    // channel-close path, so the assertion depends on the token.
+    let per_token = Duration::from_millis(400);
+    let emitted = Arc::new(AtomicUsize::new(0));
+    let exited = Arc::new(AtomicBool::new(false));
+    let backend = MockBackend::with_observers(per_token, Arc::clone(&emitted), Arc::clone(&exited));
+
+    let total_tokens = MOCK_SENTENCE.split_whitespace().count();
+    assert!(
+        total_tokens > 2,
+        "sentence must have several tokens so a surviving producer would keep emitting"
+    );
+
     let mut stream = backend.generate_stream(req()).await.expect("stream starts");
 
-    // Pull exactly one token, then drop the stream mid-sentence.
+    // Pull exactly one token, then drop the stream mid-sentence. At this point
+    // the producer has looped back and is parked in `sleep(per_token)` waiting
+    // to emit the second token.
     let first = stream.next().await.expect("first token").expect("ok chunk");
     assert_eq!(first.index, 0);
     assert!(!first.done, "we stopped before the end of the sentence");
 
-    let total_tokens = MOCK_SENTENCE.split_whitespace().count();
-    assert!(
-        total_tokens > 1,
-        "sentence must have remaining tokens to cut off"
-    );
-
     drop(stream);
 
-    // If cancellation works the producer exits immediately. We wait for only a
-    // fraction of what finishing the sentence would cost; completing quickly is
-    // the observable evidence that we are not blocked on a still-running
-    // producer.
-    let remaining_if_alive = per_token * (total_tokens as u32 - 1);
-    let start = Instant::now();
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    // Wait only a small fraction of one token delay. Long enough for a
+    // cancelled producer to run its early-return and set the exit flag, far too
+    // short for a producer stuck in `sleep(400ms)` to wake up.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
     assert!(
-        start.elapsed() < remaining_if_alive,
-        "dropping the stream must cancel the producer, not wait {remaining_if_alive:?}"
+        exited.load(Ordering::SeqCst),
+        "producer did not exit promptly after the stream was dropped; the \
+         CancellationToken path is not cancelling the in-flight sleep"
+    );
+    // And it certainly must not have emitted the whole sentence.
+    let count = emitted.load(Ordering::SeqCst);
+    assert!(
+        count < total_tokens,
+        "producer emitted {count}/{total_tokens} tokens despite the drop; cancellation failed"
     );
 }
