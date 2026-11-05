@@ -1,0 +1,64 @@
+# PyO3 extension-module crate: exposes the core backends to Python.
+#
+# # Why this layout
+#
+# The whole point of Milestone 3 is to bind the *in-process* core streaming
+# client, not to shell out to the HTTP server. So this crate depends on
+# `llm-stream-core` directly and drives its async `Backend` on a tokio runtime
+# that lives inside the Python `Client` object.
+#
+# # The `extension-module` feature dance (interview point)
+#
+# PyO3's `extension-module` feature tells PyO3 *not* to link libpython at build
+# time — the symbols are resolved at runtime by the Python interpreter that
+# loads the `.pyd`/`.so`. That is exactly what you want when maturin builds a
+# wheel. But it is also what *breaks a plain `cargo test`*: a normal test binary
+# is a standalone executable that has to link libpython itself, and with
+# `extension-module` on there is nothing to resolve those symbols against, so
+# the link step fails.
+#
+# The standard fix (applied here): make `extension-module` a DEFAULT-OFF
+# feature. `cargo build`/`cargo test` at the workspace root therefore build the
+# crate *without* it (so the crate still type-checks and compiles as part of the
+# workspace), while maturin turns it on explicitly via `pyproject.toml`
+# (`features = ["pyo3/extension-module"]`). This keeps a bare `cargo test` green
+# while still producing a correct, libpython-free wheel.
+[package]
+name = "llm-stream-py"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "PyO3 bindings exposing the llm-stream-core backends to Python as the `llm_stream` package."
+
+# A cdylib is the shared library Python loads as a native extension module.
+# `rlib` is kept alongside so the crate can still participate in a normal
+# `cargo build`/`cargo test` at the workspace root (a cdylib alone is awkward to
+# compile as a plain library target on some setups).
+[lib]
+name = "llm_stream"
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[features]
+# Off by default on purpose — see the module header above. maturin enables it.
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+llm-stream-core = { path = "../core" }
+
+# pyo3 0.25: the last series that still exposes `Python::allow_threads` as the
+# non-deprecated name for releasing the GIL (0.29+ renames it to `detach`). The
+# GIL-release span in this crate is the headline interview point, so we pin a
+# version where that method name is the blessed API. `abi3-py39` builds a single
+# forward-compatible wheel for CPython 3.9+ (no per-version rebuild).
+pyo3 = { version = "0.25", features = ["abi3-py39"] }
+
+# A multi-thread runtime per Client drives the async Backend. `sync` gives us
+# the mpsc channel that bridges the async stream to the blocking iterator.
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time", "sync", "macros"] }
+futures = { workspace = true, features = ["std", "async-await"] }
+
+[dev-dependencies]
+# Rust-side unit tests (the channel bridge) run on a multi-thread runtime.
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time", "sync", "macros"] }

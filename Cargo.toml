@@ -9,7 +9,7 @@
 # more crates are added.
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/server"]
+members = ["crates/core", "crates/server", "crates/py"]
 
 [workspace.package]
 edition = "2021"

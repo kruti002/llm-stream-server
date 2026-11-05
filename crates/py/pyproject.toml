@@ -1,0 +1,33 @@
+# maturin build configuration for the `llm_stream` Python package.
+#
+# `maturin develop` (see the crate README) builds the cdylib with the
+# pyo3/extension-module feature enabled and drops it into the active venv so
+# `import llm_stream` works and `pytest` can run against it.
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "llm_stream"
+description = "In-process Rust LLM streaming client exposed to Python via PyO3."
+requires-python = ">=3.9"
+# abi3-py39 (set in Cargo.toml) makes one wheel work across CPython 3.9+.
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.maturin]
+# The crate lives under crates/py; this file sits next to its Cargo.toml.
+manifest-path = "Cargo.toml"
+# The importable module name. Must match the `[lib] name` in Cargo.toml and the
+# `#[pymodule] fn llm_stream` in src/lib.rs.
+module-name = "llm_stream"
+# Turn on the default-off feature so maturin builds a libpython-free extension
+# module, while a plain `cargo test` at the workspace root (which does NOT pass
+# this) still links and runs. This is the pattern that keeps `cargo test` green.
+features = ["pyo3/extension-module"]

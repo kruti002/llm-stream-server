@@ -17,3 +17,11 @@ Thumbs.db
 # IDE
 .idea/
 .vscode/
+
+# Python (py crate: virtualenvs, caches, build artifacts)
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.pyd
+*.so
