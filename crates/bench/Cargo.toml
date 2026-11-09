@@ -1,0 +1,32 @@
+[package]
+name = "llm-stream-bench"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "HTTP load + latency benchmark tool for the llm-stream-server streaming API."
+
+# A single binary crate. There is no library surface to share, but we keep the
+# stats/percentile helpers in their own module with unit tests so the numbers
+# the tool reports are themselves tested.
+[[bin]]
+name = "llm-stream-bench"
+path = "src/main.rs"
+
+[dependencies]
+# The harness drives the server over HTTP only — it never links the backends.
+# `reqwest` features come from the workspace (json/stream/rustls-tls, defaults
+# off): `stream` is what lets us read the SSE body chunk-by-chunk and timestamp
+# the first token precisely instead of waiting for the whole response.
+reqwest = { workspace = true }
+# Full async runtime: multi-thread so concurrency levels actually run in
+# parallel, timers for the health-wait, sync for the worker-pool semaphore.
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
+# `futures` gives the buffered-stream combinator used for the bounded worker
+# pool and the `Stream`/`StreamExt` traits for the reqwest byte stream.
+futures = { workspace = true, features = ["std", "async-await"] }
+# CLI surface, derive API — same convention as the server crate.
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bytes = { workspace = true }
