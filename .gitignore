@@ -25,3 +25,6 @@ __pycache__/
 .pytest_cache/
 *.pyd
 *.so
+
+# Agent workflow artifacts (internal build-process notes, not part of the project)
+.agents/
