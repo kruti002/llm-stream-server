@@ -1,0 +1,29 @@
+# Keep the Docker build context small: the builder recompiles from source, so
+# none of these need to be sent to the daemon.
+target/
+.git/
+.gitignore
+
+# Python virtualenv / caches / build artifacts (py crate)
+.venv/
+**/.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+**/.pytest_cache/
+crates/py/dist/
+
+# Agent workflow artifacts
+.agents/
+
+# CI/Docker files not needed inside the build
+.github/
+Dockerfile
+.dockerignore
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -1,5 +1,8 @@
 # llm-stream-server
 
+<!-- Replace OWNER/REPO with the GitHub path once the repo has a remote. -->
+[![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
+
 A learning/interview project: a streaming LLM server built in small milestones,
 with pluggable inference backends and a strong focus on explaining *why* each
 piece is shaped the way it is.
@@ -87,4 +90,52 @@ From this directory (with cargo on PATH):
 cargo test
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
+```
+
+## Docker
+
+A multi-stage `Dockerfile` at the repo root builds the `llm-stream-server`
+binary in a Rust builder image and copies just the compiled binary into a slim
+Debian runtime. Because TLS is rustls (pure Rust) throughout, the runtime image
+needs **no** OpenSSL/libssl package.
+
+```sh
+# build the image
+docker build -t llm-stream-server .
+
+# run it (mock backend by default, listens on :8080)
+docker run -p 8080:8080 llm-stream-server
+```
+
+The backend and other settings are configurable via env vars (clap reads the
+`LLM_*` variables) or by appending flags after the image name:
+
+```sh
+docker run -p 8080:8080 \
+    -e LLM_BACKEND=ollama -e LLM_OLLAMA_URL=http://host.docker.internal:11434 \
+    llm-stream-server --model llama3.2:1b
+```
+
+## CI / Release
+
+GitHub Actions workflows live in `.github/workflows/`:
+
+* **`ci.yml`** — on every push/PR to `main`, runs `cargo fmt`, `cargo clippy`
+  and `cargo test --all` across `ubuntu-latest`, `macos-latest` and
+  `windows-latest` (each runner's default stable toolchain; MSVC on Windows CI
+  is expected even though the dev machine uses the GNU toolchain — nothing here
+  hard-depends on GNU). A separate matrix builds the Python extension wheel
+  (abi3, CPython 3.9+) on all three OSes and runs the pytest suite against the
+  mock backend.
+* **`release.yml`** — triggered by pushing a `v*` tag. It builds the release
+  binary for Linux x86_64, macOS x86_64, macOS aarch64 (Apple Silicon) and
+  Windows x86_64, packages each (tar.gz on unix, zip on Windows) with the README
+  and LICENSE files, builds the Python wheels, and attaches everything to a
+  GitHub Release.
+
+Cut a release by pushing a semver tag:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
 ```

@@ -1,0 +1,132 @@
+# Continuous integration for the llm-stream-server workspace.
+#
+# Runs on every push and pull_request targeting `main`. (The developer machine
+# builds with the GNU Rust toolchain on Windows/MinGW, but CI deliberately does
+# NOT pin a host triple: each GitHub-hosted runner uses its own default stable
+# toolchain — MSVC on windows-latest, which is fine because nothing in this
+# project hard-depends on GNU. TLS is rustls everywhere, so there is no OpenSSL
+# system package to install on any runner.)
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref to save runner minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Headline cross-platform gate: fmt + clippy + the full test suite on
+  # Linux, macOS and Windows with each runner's default stable toolchain.
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain (rustfmt + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
+
+      # fmt only needs to run once, but running it per-OS is harmless and keeps
+      # the job self-contained.
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      # Default features only: the py crate's `extension-module` feature is
+      # default-OFF, so `cargo test --all` builds+links the py crate without
+      # libpython and the whole workspace's tests run on every OS.
+      - name: test
+        run: cargo test --all
+
+  # TODO(milestone: llama-cpp backend): add a job here that builds the server
+  # with the llama-cpp backend once that feature exists, e.g.
+  #
+  #   llama-cpp-feature:
+  #     name: build llama-cpp feature
+  #     runs-on: ubuntu-latest
+  #     steps:
+  #       - uses: actions/checkout@v4
+  #       - uses: dtolnay/rust-toolchain@stable
+  #       - uses: Swatinem/rust-cache@v2
+  #       - run: cargo build -p llm-stream-server --features llama-cpp
+  #
+  # The job is intentionally OMITTED today: crates/server/Cargo.toml has no
+  # `llama-cpp` feature yet (there is no `[features]` table in that crate), so
+  # such a build would fail with "none of the selected packages contains these
+  # features". Add this job in the same PR that lands the llama-cpp milestone.
+
+  # Build the Python extension wheel and run the existing pytest suite against
+  # the MOCK backend (no model, no network) on all three OSes.
+  python-wheels:
+    name: python-wheels (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        # pyproject.toml lives next to the py crate's Cargo.toml.
+        working-directory: crates/py
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Build an abi3 wheel. `abi3-py39` (set in the crate's Cargo.toml) makes a
+      # single wheel work across CPython 3.9+, so one wheel per OS is enough.
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --out dist
+          # Avoid manylinux repair quirks in this simple pure-rustls build;
+          # the wheel only needs to run on the CI runner for the pytest step.
+          manylinux: auto
+          working-directory: crates/py
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.os }}
+          path: crates/py/dist/*.whl
+
+      # Install the freshly built wheel and run the 8 existing tests against the
+      # mock backend. `--find-links dist` installs the local wheel; pytest then
+      # imports the installed `llm_stream` module.
+      - name: Install wheel + pytest
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --find-links dist llm_stream pytest
+        shell: bash
+
+      - name: Run pytest (mock backend)
+        run: python -m pytest -q
+        shell: bash

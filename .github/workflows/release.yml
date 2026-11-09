@@ -1,0 +1,117 @@
+# Release pipeline: cut a GitHub Release with prebuilt server binaries and
+# Python wheels.
+#
+# Trigger: pushing a git tag matching `v*` (e.g. `v0.1.0`). A release is cut by:
+#   git tag v0.1.0 && git push origin v0.1.0
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Build the release binary for each OS/arch and attach it to the Release.
+  binaries:
+    name: binary (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    # Needed so softprops/action-gh-release can create/update the Release.
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          # macOS Apple Silicon: macos-latest runners are arm64, but we add the
+          # x86_64 target above explicitly and cross-compile aarch64 here so the
+          # Release ships both Intel and Apple-Silicon macOS binaries.
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain (${{ matrix.target }})
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release -p llm-stream-server --target ${{ matrix.target }}
+
+      # Package the binary with the READMEs + LICENSE files. tar.gz on unix,
+      # zip on Windows. Asset names carry the target triple for clarity.
+      - name: Package (unix)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          staging="llm-stream-server-${{ matrix.target }}"
+          mkdir "$staging"
+          cp "target/${{ matrix.target }}/release/llm-stream-server" "$staging/"
+          cp README.md LICENSE-MIT LICENSE-APACHE "$staging/"
+          tar czf "$staging.tar.gz" "$staging"
+          echo "ASSET=$staging.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Package (windows)
+        if: matrix.archive == 'zip'
+        shell: bash
+        run: |
+          staging="llm-stream-server-${{ matrix.target }}"
+          mkdir "$staging"
+          cp "target/${{ matrix.target }}/release/llm-stream-server.exe" "$staging/"
+          cp README.md LICENSE-MIT LICENSE-APACHE "$staging/"
+          7z a "$staging.zip" "$staging"
+          echo "ASSET=$staging.zip" >> "$GITHUB_ENV"
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ASSET }}
+
+  # Build the Python wheels and attach them to the same Release.
+  wheels:
+    name: wheel (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
+
+      # abi3 wheel: one wheel per OS works across CPython 3.9+.
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --out dist
+          manylinux: auto
+          working-directory: crates/py
+
+      - name: Upload wheels to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: crates/py/dist/*.whl
