@@ -28,3 +28,11 @@ __pycache__/
 
 # Agent workflow artifacts (internal build-process notes, not part of the project)
 .agents/
+
+# maturin build output (wheels are built in CI, not committed)
+dist/
+
+# Local environment / secrets
+.env
+.env.*
+!.env.example
